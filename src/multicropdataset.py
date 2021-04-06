@@ -12,7 +12,7 @@ import numpy as np
 import torchvision.datasets as datasets
 import torchvision.transforms as transforms
 from skimage import io, img_as_float32
-from mammo_transforms import ToTensor3D
+from .mammo_transforms import ToTensor3D
 
 logger = getLogger()
 
