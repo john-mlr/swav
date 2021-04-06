@@ -11,6 +11,8 @@ from PIL import ImageFilter
 import numpy as np
 import torchvision.datasets as datasets
 import torchvision.transforms as transforms
+from skimage import io, img_as_float32
+from mammo_transforms import ToTensor3D
 
 logger = getLogger()
 
@@ -44,17 +46,18 @@ class MultiCropDataset(datasets.ImageFolder):
                 scale=(min_scale_crops[i], max_scale_crops[i]),
             )
             trans.extend([transforms.Compose([
+                ToTensor3D(),
                 randomresizedcrop,
                 transforms.RandomHorizontalFlip(p=0.5),
                 transforms.Compose(color_transform),
-                transforms.ToTensor(),
                 transforms.Normalize(mean=mean, std=std)])
             ] * nmb_crops[i])
         self.trans = trans
 
     def __getitem__(self, index):
         path, _ = self.samples[index]
-        image = self.loader(path)
+        image = io.imread(path)
+        image = img_as_float32(image)
         multi_crops = list(map(lambda trans: trans(image), self.trans))
         if self.return_index:
             return index, multi_crops
