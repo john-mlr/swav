@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 """ A custom ToTensor class, for use with 16bit grayscale pngs. As PIL is incompatible with this image type,
     we made our own.
 """

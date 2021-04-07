@@ -13,6 +13,7 @@ import torchvision.datasets as datasets
 import torchvision.transforms as transforms
 from skimage import io, img_as_float32
 from .mammo_transforms import ToTensor3D
+import os
 
 logger = getLogger()
 
@@ -28,7 +29,8 @@ class MultiCropDataset(datasets.ImageFolder):
         size_dataset=-1,
         return_index=False,
     ):
-        super(MultiCropDataset, self).__init__(data_path)
+        self.samples = os.listdir(data_path)
+        self.data_path = data_path
         assert len(size_crops) == len(nmb_crops)
         assert len(min_scale_crops) == len(nmb_crops)
         assert len(max_scale_crops) == len(nmb_crops)
@@ -36,7 +38,8 @@ class MultiCropDataset(datasets.ImageFolder):
             self.samples = self.samples[:size_dataset]
         self.return_index = return_index
 
-        color_transform = [get_color_distortion(), PILRandomGaussianBlur()]
+        color_transform = [get_color_distortion(), 
+                           transforms.GaussianBlur(kernel_size=int(.1*224)+1,sigma=(0.1, 2.0))]
         mean = [0.485, 0.456, 0.406]
         std = [0.228, 0.224, 0.225]
         trans = []
@@ -55,8 +58,9 @@ class MultiCropDataset(datasets.ImageFolder):
         self.trans = trans
 
     def __getitem__(self, index):
-        path, _ = self.samples[index]
-        image = io.imread(path)
+        path = self.samples[index]
+        path_to_image = os.path.join(self.data_path, path)
+        image = io.imread(path_to_image)
         image = img_as_float32(image)
         multi_crops = list(map(lambda trans: trans(image), self.trans))
         if self.return_index:
