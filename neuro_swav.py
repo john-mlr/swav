@@ -21,8 +21,7 @@ import torch.distributed as dist
 import torch.optim
 import apex
 from apex.parallel.LARC import LARC
-from sklearn.metrics import normalized_mutual_info_score
-from scipy.stats import entropy
+from neuro import PatchDataset, get_patches_labels
 
 from src.utils import (
     bool_flag,
@@ -36,6 +35,7 @@ from src.multicropdataset import MultiCropDataset
 import src.resnet50 as resnet_models
 
 logger = getLogger()
+torch.cuda.empty_cache()
 
 parser = argparse.ArgumentParser(description="Implementation of SwAV")
 
@@ -44,8 +44,6 @@ parser = argparse.ArgumentParser(description="Implementation of SwAV")
 #########################
 parser.add_argument("--data_path", type=str, default="/path/to/imagenet",
                     help="path to dataset repository")
-parser.add_argument("--val_path", type=str, default="path/to/valset",
-                    help="path to validation dataset")
 parser.add_argument("--nmb_crops", type=int, default=[2], nargs="+",
                     help="list of number of crops (example: [2, 6])")
 parser.add_argument("--size_crops", type=int, default=[224], nargs="+",
@@ -123,81 +121,41 @@ parser.add_argument("--dump_path", type=str, default=".",
                     help="experiment dump path for checkpoints and log")
 parser.add_argument("--seed", type=int, default=31, help="seed")
 
+print(torch.cuda.memory_allocated(), flush=True)
+def get_color_distortion(s=1.0):
+    # s is the strength of color distortion.
+    color_jitter = transforms.ColorJitter(0.8*s, 0.8*s, 0.8*s, 0.2*s)
+    rnd_color_jitter = transforms.RandomApply([color_jitter], p=0.8)
+    rnd_gray = transforms.RandomGrayscale(p=0.2)
+    color_distort = transforms.Compose([rnd_color_jitter, rnd_gray])
+    return color_distort
 
-def soft_nmi(q, labels):
-    """ Calculate NMI with soft assignments to prototypes.
-    
-        Args:
-            q (ndarray): soft cluster assignments, shape [num_samples, num_prots]
-            labels (ndarray): ground truth labels
-    """
-    # create contingency table
-    top_label = max(labels)
-    cont_table = []
-    for i in range(0, top_label+1):
-        label_q = q[np.where(labels==i)]
-        cont_table.append(label_q.sum(axis=0))
-    cont_table = np.array(cont_table)
-    
-    # normalize for probabilities
-    cont_table = cont_table / len(labels)
-    
-    # find marginal probabilities
-    u = cont_table.sum(axis=1)
-    v = cont_table.sum(axis=0)
-    
-    # calculate MI and entropies
-    mi = 0
-    ent_u = 0
-    ent_v = 0
-    for v_i in range(len(v)):
-        sub_ent_v = entropy(cont_table[:, v_i])
-        ent_v += sub_ent_v
-
-        for u_j in range(len(u)):
-            p_i_j = cont_table[u_j, v_i]
-            v_i_j = v[v_i]
-            u_i_j = u[u_j]
-
-            sub_mi = p_i_j * np.log(p_i_j / (v_i_j*u_i_j))
-
-            mi += sub_mi
-
-            if v_i == len(v)-1:
-                sub_ent_u = entropy(cont_table[u_j, :])
-                ent_u += sub_ent_u
-                
-    soft_nmi = mi / ((ent_u + ent_v) / 2)
-
-    return soft_nmi
-
-
-logger = getLogger()
 
 def main():
     global args
     args = parser.parse_args()
     init_distributed_mode(args)
     fix_random_seeds(args.seed)
-    logger, training_stats = initialize_exp(args, "epoch", "loss", "soft-nmi", "val-soft-nmi", dump_params=False)
+    logger, training_stats = initialize_exp(args, "epoch", "loss")
+    print(torch.cuda.memory_allocated(), flush=True)
+    
+    train_paths, train_labs, dev_paths, dev_labs, test_paths, test_labs = get_patches_labels('./sc/arion/work/millej37/ML-project/patches',
+                                                                                             './sc/arion/work/millej37/ML-project/swav')
+    color_transform = [get_color_distortion(), 
+                           transforms.GaussianBlur(kernel_size=int(.1*224)+1,sigma=(0.1, 2.0))]
+    mean = [0.485, 0.456, 0.406]
+    std = [0.228, 0.224, 0.225]
+    swav_transform = transforms.Compose([
+                                         transforms.ToTensor(),
+                                         transforms.RandomResizedCrop(),
+                                         transforms.RandomHorizontalFlip(p=0.5),
+                                         transforms.Compose(color_transform),
+                                         transforms.Normalize(mean=mean, std=std)
+                                         ])
 
     # build data
-    train_dataset = MultiCropDataset(
-        args.data_path,
-        args.size_crops,
-        args.nmb_crops,
-        args.min_scale_crops,
-        args.max_scale_crops,
-    )
-    val_dataset = MultiCropDataset(
-        args.val_path,
-        args.size_crops,
-        args.nmb_crops,
-        args.min_scale_crops,
-        args.max_scale_crops,
-    )
+    train_dataset = PatchDataset(train_paths, transform=swav_transform)
     sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
-    val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset)
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         sampler=sampler,
@@ -206,14 +164,7 @@ def main():
         pin_memory=True,
         drop_last=True
     )
-    val_loader = torch.utils.data.DataLoader(
-        val_dataset,
-        sampler=val_sampler,
-        batch_size=args.batch_size,
-        num_workers=args.workers,
-        pin_memory=True,
-    )
-    logger.info("Building data done with {} train and {} val images loaded.".format(len(train_dataset), len(val_dataset)))
+    logger.info("Building data done with {} images loaded.".format(len(train_dataset)))
 
     # build model
     model = resnet_models.__dict__[args.arch](
@@ -222,6 +173,7 @@ def main():
         output_dim=args.feat_dim,
         nmb_prototypes=args.nmb_prototypes,
     )
+    print(torch.cuda.memory_allocated(), flush=True)
     # synchronize batch norm layers
     if args.sync_bn == "pytorch":
         model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
@@ -301,7 +253,7 @@ def main():
             ).cuda()
 
         # train the network
-        scores, queue = train(train_loader, model, optimizer, epoch, lr_schedule, queue, val_loader)
+        scores, queue = train(train_loader, model, optimizer, epoch, lr_schedule, queue)
         training_stats.update(scores)
 
         # save checkpoints
@@ -326,18 +278,16 @@ def main():
             torch.save({"queue": queue}, queue_path)
 
 
-def train(train_loader, model, optimizer, epoch, lr_schedule, queue, val_loader):
+def train(train_loader, model, optimizer, epoch, lr_schedule, queue):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     losses = AverageMeter()
-    norm_mut_info = AverageMeter()
-    val_norm_mut_info = AverageMeter()
 
     model.train()
     use_the_queue = False
 
     end = time.time()
-    for it, (inputs, labels) in enumerate(train_loader):
+    for it, inputs in enumerate(train_loader):
         # measure data loading time
         data_time.update(time.time() - end)
 
@@ -385,11 +335,6 @@ def train(train_loader, model, optimizer, epoch, lr_schedule, queue, val_loader)
                 subloss -= torch.mean(torch.sum(q * F.log_softmax(x, dim=1), dim=1))
             loss += subloss / (np.sum(args.nmb_crops) - 1)
         loss /= len(args.crops_for_assign)
-        
-        score, cluster_assignments = q.max(1)
-        cluster_assignments = cluster_assignments.cpu().numpy()
-        nmi = normalized_mutual_info_score(labels.cpu().numpy(), cluster_assignments)
-        torch.save(q, './sample_assignments.pth')
 
         # ============ backward and optim step ... ============
         optimizer.zero_grad()
@@ -405,81 +350,26 @@ def train(train_loader, model, optimizer, epoch, lr_schedule, queue, val_loader)
                     p.grad = None
         optimizer.step()
 
-        val_nmi = val(val_loader, model, queue)
         # ============ misc ... ============
         losses.update(loss.item(), inputs[0].size(0))
         batch_time.update(time.time() - end)
-        norm_mut_info.update(nmi)
-        val_norm_mut_info.update(val_nmi)
         end = time.time()
-        if args.rank ==0 and it % 10 == 0:
+        if args.rank ==0 and it % 50 == 0:
             logger.info(
                 "Epoch: [{0}][{1}]\t"
                 "Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t"
+                "Data {data_time.val:.3f} ({data_time.avg:.3f})\t"
                 "Loss {loss.val:.4f} ({loss.avg:.4f})\t"
-                "Lr: {lr:.4f}\t"
-                "NMI: {nmi:.4f}\t"
-                "Val NMI: {val_nmi:.4f}".format(
+                "Lr: {lr:.4f}".format(
                     epoch,
                     it,
                     batch_time=batch_time,
+                    data_time=data_time,
                     loss=losses,
                     lr=optimizer.optim.param_groups[0]["lr"],
-                    nmi=nmi,
-                    val_nmi=val_nmi,
                 )
             )
-    return (epoch, losses.avg, norm_mut_info.avg, val_norm_mut_info.avg), queue
-
-
-def val(val_loader, model, queue):
-    norm_mut_info = AverageMeter()
-    use_the_queue = False
-
-    model.eval()
-    end = time.time()
-    with torch.no_grad():
-        for it, (inputs, labels) in enumerate(val_loader):
-            # normalize the prototypes
-            with torch.no_grad():
-                w = model.module.prototypes.weight.data.clone()
-                w = nn.functional.normalize(w, dim=1, p=2)
-                model.module.prototypes.weight.copy_(w)
-
-            # ============ multi-res forward passes ... ============
-            embedding, output = model(inputs)
-            embedding = embedding.detach()
-            bs = inputs[0].size(0)
-
-            # ============ swav loss ... ============
-            loss = 0
-            for i, crop_id in enumerate(args.crops_for_assign):
-                with torch.no_grad():
-                    out = output[bs * crop_id: bs * (crop_id + 1)].detach()
-
-                    # time to use the queue
-                    if queue is not None:
-                        if use_the_queue or not torch.all(queue[i, -1, :] == 0):
-                            use_the_queue = True
-                            out = torch.cat((torch.mm(
-                                queue[i],
-                                model.module.prototypes.weight.t()
-                            ), out))
-                        # fill the queue
-                        queue[i, bs:] = queue[i, :-bs].clone()
-                        queue[i, :bs] = embedding[crop_id * bs: (crop_id + 1) * bs]
-
-                    # get assignments
-                    q = distributed_sinkhorn(out)[-bs:]
-            
-            score, cluster_assignments = q.max(1)
-            cluster_assignments = cluster_assignments.cpu().numpy()
-            nmi = normalized_mutual_info_score(labels.cpu().numpy(), cluster_assignments)
-
-            # ============ misc ... ============
-            norm_mut_info.update(nmi)
-
-    return norm_mut_info.avg
+    return (epoch, losses.avg), queue
 
 
 @torch.no_grad()

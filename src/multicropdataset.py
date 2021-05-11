@@ -7,13 +7,23 @@
 import random
 from logging import getLogger
 
-import cv2
 from PIL import ImageFilter
 import numpy as np
 import torchvision.datasets as datasets
 import torchvision.transforms as transforms
+from skimage import io, img_as_float32
+from .mammo_transforms import ToTensor3D
+import os
 
 logger = getLogger()
+
+
+from skimage.util import img_as_float32
+from skimage import io
+
+def sk_loader(path): # try using skimage
+    image = io.imread(path)
+    return img_as_float32(image)
 
 
 class MultiCropDataset(datasets.ImageFolder):
@@ -26,9 +36,8 @@ class MultiCropDataset(datasets.ImageFolder):
         max_scale_crops,
         size_dataset=-1,
         return_index=False,
-        pil_blur=False,
     ):
-        super(MultiCropDataset, self).__init__(data_path)
+        super(MultiCropDataset, self).__init__(data_path, loader=sk_loader)
         assert len(size_crops) == len(nmb_crops)
         assert len(min_scale_crops) == len(nmb_crops)
         assert len(max_scale_crops) == len(nmb_crops)
@@ -36,9 +45,7 @@ class MultiCropDataset(datasets.ImageFolder):
             self.samples = self.samples[:size_dataset]
         self.return_index = return_index
 
-        color_transform = [get_color_distortion(), RandomGaussianBlur()]
-        if pil_blur:
-            color_transform = [get_color_distortion(), PILRandomGaussianBlur()]
+        color_transform = [get_color_distortion()]
         mean = [0.485, 0.456, 0.406]
         std = [0.228, 0.224, 0.225]
         trans = []
@@ -48,30 +55,21 @@ class MultiCropDataset(datasets.ImageFolder):
                 scale=(min_scale_crops[i], max_scale_crops[i]),
             )
             trans.extend([transforms.Compose([
+                ToTensor3D(),
                 randomresizedcrop,
-                transforms.RandomHorizontalFlip(p=0.5),
-                transforms.Compose(color_transform),
-                transforms.ToTensor(),
+                #transforms.RandomHorizontalFlip(p=0.5),
+                #transforms.Compose(color_transform),
                 transforms.Normalize(mean=mean, std=std)])
             ] * nmb_crops[i])
         self.trans = trans
 
     def __getitem__(self, index):
-        path, _ = self.samples[index]
+        path, label = self.samples[index]
         image = self.loader(path)
         multi_crops = list(map(lambda trans: trans(image), self.trans))
         if self.return_index:
             return index, multi_crops
-        return multi_crops
-
-
-class RandomGaussianBlur(object):
-    def __call__(self, img):
-        do_it = np.random.rand() > 0.5
-        if not do_it:
-            return img
-        sigma = np.random.rand() * 1.9 + 0.1
-        return cv2.GaussianBlur(np.asarray(img), (23, 23), sigma)
+        return multi_crops, label
 
 
 class PILRandomGaussianBlur(object):

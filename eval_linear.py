@@ -29,6 +29,16 @@ from src.utils import (
     accuracy,
 )
 import src.resnet50 as resnet_models
+from src.mammo_transforms import ToTensor3D
+from dm_meta import DMMetaManager
+
+from skimage.util import img_as_float32
+from skimage import io
+
+def sk_loader(path): # try using skimage
+    image = io.imread(path)
+    return img_as_float32(image)
+
 
 logger = getLogger()
 
@@ -59,7 +69,7 @@ parser.add_argument("--use_bn", default=False, type=bool_flag,
 #########################
 #### optim parameters ###
 #########################
-parser.add_argument("--epochs", default=100, type=int,
+parser.add_argument("--epochs", default=1000, type=int,
                     help="number of total epochs to run")
 parser.add_argument("--batch_size", default=32, type=int,
                     help="batch size per gpu, i.e. how many unique instances per gpu")
@@ -72,7 +82,7 @@ parser.add_argument("--decay_epochs", type=int, nargs="+", default=[60, 80],
                     help="Epochs at which to decay learning rate.")
 parser.add_argument("--gamma", type=float, default=0.1, help="decay factor")
 # for cosine learning rate schedule
-parser.add_argument("--final_lr", type=float, default=0, help="final learning rate")
+parser.add_argument("--final_lr", type=float, default=0.1, help="final learning rate")
 
 #########################
 #### dist parameters ###
@@ -94,12 +104,12 @@ def main():
     init_distributed_mode(args)
     fix_random_seeds(args.seed)
     logger, training_stats = initialize_exp(
-        args, "epoch", "loss", "prec1", "prec5", "loss_val", "prec1_val", "prec5_val"
+        args, "epoch", "loss", "prec1", "prec2", "loss_val", "prec1_val", "prec2_val"
     )
 
-    # build data
-    train_dataset = datasets.ImageFolder(os.path.join(args.data_path, "train"))
-    val_dataset = datasets.ImageFolder(os.path.join(args.data_path, "val"))
+     # build data
+    train_dataset = datasets.ImageFolder(os.path.join(args.data_path, "bps-train"))
+    val_dataset = datasets.ImageFolder(os.path.join(args.data_path, "cbis-test"))
     tr_normalize = transforms.Normalize(
         mean=[0.485, 0.456, 0.406], std=[0.228, 0.224, 0.225]
     )
@@ -131,9 +141,10 @@ def main():
     )
     logger.info("Building data done")
 
-    # build model
+
+# build model
     model = resnet_models.__dict__[args.arch](output_dim=0, eval_mode=True)
-    linear_classifier = RegLog(1000, args.arch, args.global_pooling, args.use_bn)
+    linear_classifier = RegLog(5, args.arch, args.global_pooling, args.use_bn)
 
     # convert batch norm layers (if any)
     linear_classifier = nn.SyncBatchNorm.convert_sync_batchnorm(linear_classifier)
@@ -168,7 +179,7 @@ def main():
 
     # set optimizer
     optimizer = torch.optim.SGD(
-        linear_classifier.parameters(),
+        list(model.parameters()) + list(linear_classifier.parameters()),
         lr=args.lr,
         nesterov=args.nesterov,
         momentum=0.9,
@@ -275,7 +286,7 @@ def train(model, reglog, optimizer, loader, epoch):
 
     # training statistics
     top1 = AverageMeter()
-    top5 = AverageMeter()
+    top2 = AverageMeter()
     losses = AverageMeter()
     end = time.perf_counter()
 
@@ -292,8 +303,7 @@ def train(model, reglog, optimizer, loader, epoch):
         target = target.cuda(non_blocking=True)
 
         # forward
-        with torch.no_grad():
-            output = model(inp)
+        output = model(inp)
         output = reglog(output)
 
         # compute cross entropy loss
@@ -307,10 +317,11 @@ def train(model, reglog, optimizer, loader, epoch):
         optimizer.step()
 
         # update stats
-        acc1, acc5 = accuracy(output, target, topk=(1, 5))
+        acc1, acc2 = accuracy(output, target, topk=(1, 2))
         losses.update(loss.item(), inp.size(0))
+
         top1.update(acc1[0], inp.size(0))
-        top5.update(acc5[0], inp.size(0))
+        top2.update(acc2[0], inp.size(0))
 
         batch_time.update(time.perf_counter() - end)
         end = time.perf_counter()
@@ -323,6 +334,7 @@ def train(model, reglog, optimizer, loader, epoch):
                 "Data {data_time.val:.3f} ({data_time.avg:.3f})\t"
                 "Loss {loss.val:.4f} ({loss.avg:.4f})\t"
                 "Prec {top1.val:.3f} ({top1.avg:.3f})\t"
+                "Top2 {top2.val:.3f} ({top2.avg:.3f})"
                 "LR {lr}".format(
                     epoch,
                     iter_epoch,
@@ -331,18 +343,19 @@ def train(model, reglog, optimizer, loader, epoch):
                     data_time=data_time,
                     loss=losses,
                     top1=top1,
+                    top2=top2,
                     lr=optimizer.param_groups[0]["lr"],
                 )
             )
 
-    return epoch, losses.avg, top1.avg.item(), top5.avg.item()
+    return epoch, losses.avg, top1.avg.item(), top2.avg.item()
 
 
 def validate_network(val_loader, model, linear_classifier):
     batch_time = AverageMeter()
     losses = AverageMeter()
     top1 = AverageMeter()
-    top5 = AverageMeter()
+    top2 = AverageMeter()
     global best_acc
 
     # switch to evaluate mode
@@ -363,10 +376,11 @@ def validate_network(val_loader, model, linear_classifier):
             output = linear_classifier(model(inp))
             loss = criterion(output, target)
 
-            acc1, acc5 = accuracy(output, target, topk=(1, 5))
+            acc1, acc2 = accuracy(output, target, topk=(1, 2))
             losses.update(loss.item(), inp.size(0))
+
+            top2.update(acc2[0], inp.size(0))
             top1.update(acc1[0], inp.size(0))
-            top5.update(acc5[0], inp.size(0))
 
             # measure elapsed time
             batch_time.update(time.perf_counter() - end)
@@ -381,10 +395,11 @@ def validate_network(val_loader, model, linear_classifier):
             "Time {batch_time.avg:.3f}\t"
             "Loss {loss.avg:.4f}\t"
             "Acc@1 {top1.avg:.3f}\t"
+            "Acc@2 {top2.avg:.3f}"
             "Best Acc@1 so far {acc:.1f}".format(
-                batch_time=batch_time, loss=losses, top1=top1, acc=best_acc))
+                batch_time=batch_time, loss=losses, top1=top1, top2=top2, acc=best_acc))
 
-    return losses.avg, top1.avg.item(), top5.avg.item()
+    return losses.avg, top1.avg.item(), top2.avg.item()
 
 
 if __name__ == "__main__":

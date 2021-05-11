@@ -55,7 +55,7 @@ def init_distributed_mode(args):
         # read environment variables
         args.rank = int(os.environ["RANK"])
         args.world_size = int(os.environ["WORLD_SIZE"])
-
+    print(torch.cuda.memory_allocated(), flush=True)
     # prepare distributed
     dist.init_process_group(
         backend="nccl",
@@ -191,6 +191,6 @@ def accuracy(output, target, topk=(1,)):
 
         res = []
         for k in topk:
-            correct_k = correct[:k].view(-1).float().sum(0, keepdim=True)
+            correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
             res.append(correct_k.mul_(100.0 / batch_size))
         return res

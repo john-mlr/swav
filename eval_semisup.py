@@ -64,7 +64,7 @@ parser.add_argument("--batch_size", default=32, type=int,
                     help="batch size per gpu, i.e. how many unique instances per gpu")
 parser.add_argument("--lr", default=0.01, type=float, help="initial learning rate - trunk")
 parser.add_argument("--lr_last_layer", default=0.2, type=float, help="initial learning rate - head")
-parser.add_argument("--decay_epochs", type=int, nargs="+", default=[12, 16],
+parser.add_argument("--decay_epochs", type=int, nargs="+", default=[40, 80],
                     help="Epochs at which to decay learning rate.")
 parser.add_argument("--gamma", type=float, default=0.2, help="lr decay factor")
 
@@ -88,20 +88,12 @@ def main():
     init_distributed_mode(args)
     fix_random_seeds(args.seed)
     logger, training_stats = initialize_exp(
-        args, "epoch", "loss", "prec1", "prec5", "loss_val", "prec1_val", "prec5_val"
+        args, "epoch", "loss", "prec1", "prec2", "loss_val", "prec1_val", "prec2_val"
     )
 
-    # build data
-    train_data_path = os.path.join(args.data_path, "train")
-    train_dataset = datasets.ImageFolder(train_data_path)
-    # take either 1% or 10% of images
-    subset_file = urllib.request.urlopen("https://raw.githubusercontent.com/google-research/simclr/master/imagenet_subsets/" + str(args.labels_perc) + "percent.txt")
-    list_imgs = [li.decode("utf-8").split('\n')[0] for li in subset_file]
-    train_dataset.samples = [(
-        os.path.join(train_data_path, li.split('_')[0], li),
-        train_dataset.class_to_idx[li.split('_')[0]]
-    ) for li in list_imgs]
-    val_dataset = datasets.ImageFolder(os.path.join(args.data_path, "val"))
+     # build data
+    train_dataset = datasets.ImageFolder(os.path.join(args.data_path, "bps-train"))
+    val_dataset = datasets.ImageFolder(os.path.join(args.data_path, "cbis-test"))
     tr_normalize = transforms.Normalize(
         mean=[0.485, 0.456, 0.406], std=[0.228, 0.224, 0.225]
     )
@@ -237,7 +229,7 @@ def train(model, optimizer, loader, epoch):
 
     # training statistics
     top1 = AverageMeter()
-    top5 = AverageMeter()
+    top2 = AverageMeter()
     losses = AverageMeter()
     end = time.perf_counter()
 
@@ -266,10 +258,11 @@ def train(model, optimizer, loader, epoch):
         optimizer.step()
 
         # update stats
-        acc1, acc5 = accuracy(output, target, topk=(1, 5))
+        acc1, acc2 = accuracy(output, target, topk=(1, 2))
         losses.update(loss.item(), inp.size(0))
+
         top1.update(acc1[0], inp.size(0))
-        top5.update(acc5[0], inp.size(0))
+        top2.update(acc2[0], inp.size(0))
 
         batch_time.update(time.perf_counter() - end)
         end = time.perf_counter()
@@ -295,14 +288,14 @@ def train(model, optimizer, loader, epoch):
                     lr_W=optimizer.param_groups[1]["lr"],
                 )
             )
-    return epoch, losses.avg, top1.avg.item(), top5.avg.item()
+    return epoch, losses.avg, top1.avg.item(), top2.avg.item()
 
 
 def validate_network(val_loader, model):
     batch_time = AverageMeter()
     losses = AverageMeter()
     top1 = AverageMeter()
-    top5 = AverageMeter()
+    top2 = AverageMeter()
     global best_acc
 
     # switch to evaluate mode
@@ -322,17 +315,18 @@ def validate_network(val_loader, model):
             output = model(inp)
             loss = criterion(output, target)
 
-            acc1, acc5 = accuracy(output, target, topk=(1, 5))
+            acc1, acc2 = accuracy(output, target, topk=(1, 2))
             losses.update(loss.item(), inp.size(0))
+
+            top2.update(acc2[0], inp.size(0))
             top1.update(acc1[0], inp.size(0))
-            top5.update(acc5[0], inp.size(0))
 
             # measure elapsed time
             batch_time.update(time.perf_counter() - end)
             end = time.perf_counter()
 
     if top1.avg.item() > best_acc[0]:
-        best_acc = (top1.avg.item(), top5.avg.item())
+        best_acc = (top1.avg.item(), top2.avg.item())
 
     if args.rank == 0:
         logger.info(
@@ -343,7 +337,7 @@ def validate_network(val_loader, model):
             "Best Acc@1 so far {acc:.1f}".format(
                 batch_time=batch_time, loss=losses, top1=top1, acc=best_acc[0]))
 
-    return losses.avg, top1.avg.item(), top5.avg.item()
+    return losses.avg, top1.avg.item(), top2.avg.item()
 
 
 if __name__ == "__main__":
