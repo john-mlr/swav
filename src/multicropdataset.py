@@ -37,12 +37,7 @@ class MultiCropDataset(datasets.ImageFolder):
         size_dataset=-1,
         return_index=False,
     ):
-<<<<<<< HEAD
         super(MultiCropDataset, self).__init__(data_path, loader=sk_loader)
-=======
-        self.samples = os.listdir(data_path)
-        self.data_path = data_path
->>>>>>> 6176b0781af5eb69b5c6ed567ebb7625d5ee79f1
         assert len(size_crops) == len(nmb_crops)
         assert len(min_scale_crops) == len(nmb_crops)
         assert len(max_scale_crops) == len(nmb_crops)
@@ -50,12 +45,7 @@ class MultiCropDataset(datasets.ImageFolder):
             self.samples = self.samples[:size_dataset]
         self.return_index = return_index
 
-<<<<<<< HEAD
         color_transform = [get_color_distortion()]
-=======
-        color_transform = [get_color_distortion(), 
-                           transforms.GaussianBlur(kernel_size=int(.1*224)+1,sigma=(0.1, 2.0))]
->>>>>>> 6176b0781af5eb69b5c6ed567ebb7625d5ee79f1
         mean = [0.485, 0.456, 0.406]
         std = [0.228, 0.224, 0.225]
         trans = []
@@ -67,35 +57,19 @@ class MultiCropDataset(datasets.ImageFolder):
             trans.extend([transforms.Compose([
                 ToTensor3D(),
                 randomresizedcrop,
-<<<<<<< HEAD
                 #transforms.RandomHorizontalFlip(p=0.5),
                 #transforms.Compose(color_transform),
-=======
-                transforms.RandomHorizontalFlip(p=0.5),
-                transforms.Compose(color_transform),
->>>>>>> 6176b0781af5eb69b5c6ed567ebb7625d5ee79f1
                 transforms.Normalize(mean=mean, std=std)])
             ] * nmb_crops[i])
         self.trans = trans
 
     def __getitem__(self, index):
-<<<<<<< HEAD
         path, label = self.samples[index]
         image = self.loader(path)
         multi_crops = list(map(lambda trans: trans(image), self.trans))
         if self.return_index:
             return index, multi_crops
         return multi_crops, label
-=======
-        path = self.samples[index]
-        path_to_image = os.path.join(self.data_path, path)
-        image = io.imread(path_to_image)
-        image = img_as_float32(image)
-        multi_crops = list(map(lambda trans: trans(image), self.trans))
-        if self.return_index:
-            return index, multi_crops
-        return multi_crops
->>>>>>> 6176b0781af5eb69b5c6ed567ebb7625d5ee79f1
 
 
 class PILRandomGaussianBlur(object):

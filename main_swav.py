@@ -432,7 +432,7 @@ def train(train_loader, model, optimizer, epoch, lr_schedule, queue, val_loader)
     return (epoch, losses.avg, norm_mut_info.avg, val_norm_mut_info.avg), queue
 
 
-def val(val_loader, model, queue):
+def val(loader, model, queue):
     norm_mut_info = AverageMeter()
     use_the_queue = False
 
