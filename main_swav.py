@@ -188,6 +188,7 @@ def main():
         args.nmb_crops,
         args.min_scale_crops,
         args.max_scale_crops,
+<<<<<<< HEAD
     )
     val_dataset = MultiCropDataset(
         args.val_path,
@@ -195,6 +196,8 @@ def main():
         args.nmb_crops,
         args.min_scale_crops,
         args.max_scale_crops,
+=======
+>>>>>>> 6176b0781af5eb69b5c6ed567ebb7625d5ee79f1
     )
     sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
     val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset)
@@ -432,6 +435,7 @@ def train(train_loader, model, optimizer, epoch, lr_schedule, queue, val_loader)
     return (epoch, losses.avg, norm_mut_info.avg, val_norm_mut_info.avg), queue
 
 
+<<<<<<< HEAD
 def val(val_loader, model, queue):
     norm_mut_info = AverageMeter()
     use_the_queue = False
@@ -482,6 +486,8 @@ def val(val_loader, model, queue):
     return norm_mut_info.avg
 
 
+=======
+>>>>>>> 6176b0781af5eb69b5c6ed567ebb7625d5ee79f1
 @torch.no_grad()
 def distributed_sinkhorn(out):
     Q = torch.exp(out / args.epsilon).t() # Q is K-by-B for consistency with notations from our paper
