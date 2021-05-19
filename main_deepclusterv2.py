@@ -22,6 +22,7 @@ import torch.optim
 import apex
 from apex.parallel.LARC import LARC
 from scipy.sparse import csr_matrix
+from sklearn.metrics import normalized_mutual_info_score
 
 from src.utils import (
     bool_flag,
@@ -43,6 +44,8 @@ parser = argparse.ArgumentParser(description="Implementation of DeepCluster-v2")
 #########################
 parser.add_argument("--data_path", type=str, default="/path/to/imagenet",
                     help="path to dataset repository")
+parser.add_argument("--val_path", type=str, default="/path/to/valset",
+                    help="path to validation set (for metric tracking)")
 parser.add_argument("--nmb_crops", type=int, default=[2], nargs="+",
                     help="list of number of crops (example: [2, 6])")
 parser.add_argument("--size_crops", type=int, default=[224], nargs="+",
@@ -116,7 +119,7 @@ def main():
     args = parser.parse_args()
     init_distributed_mode(args)
     fix_random_seeds(args.seed)
-    logger, training_stats = initialize_exp(args, "epoch", "loss")
+    logger, training_stats = initialize_exp(args, "epoch", "loss", "train-nmi", "val-nmi")
 
     # build data
     train_dataset = MultiCropDataset(
@@ -127,7 +130,16 @@ def main():
         args.max_scale_crops,
         return_index=True,
     )
+    val_dataset = MultiCropDataset(
+        args.val_path,
+        args.size_crops,
+        args.nmb_crops,
+        args.min_scale_crops,
+        args.max_scale_crops,
+        return_index=True
+    )
     sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
+    val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset)
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         sampler=sampler,
@@ -136,7 +148,14 @@ def main():
         pin_memory=True,
         drop_last=True
     )
-    logger.info("Building data done with {} images loaded.".format(len(train_dataset)))
+    val_loader = torch.utils.data.DataLoader(
+        val_dataset,
+        sampler=val_sampler,
+        batch_size=args.batch_size,
+        num_workers=args.workers,
+        pin_memory=True,
+    )
+    logger.info("Building data done with {} train and {} val images loaded.".format(len(train_dataset), len(val_dataset)))
 
     # build model
     model = resnet_models.__dict__[args.arch](
@@ -218,6 +237,7 @@ def main():
             lr_schedule,
             local_memory_index,
             local_memory_embeddings,
+            val_loader,
         )
         training_stats.update(scores)
 
@@ -241,10 +261,12 @@ def main():
                     "local_memory_index": local_memory_index}, mb_path)
 
 
-def train(loader, model, optimizer, epoch, schedule, local_memory_index, local_memory_embeddings):
+def train(loader, model, optimizer, epoch, schedule, local_memory_index, local_memory_embeddings, val_loader):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     losses = AverageMeter()
+    train_nmi = AverageMeter()
+    val_nmi = AverageMeter()
     model.train()
     cross_entropy = nn.CrossEntropyLoss(ignore_index=-100)
 
@@ -253,9 +275,11 @@ def train(loader, model, optimizer, epoch, schedule, local_memory_index, local_m
 
     end = time.time()
     start_idx = 0
-    for it, (idx, inputs) in enumerate(loader):
+    for it, (idx, inputs, labels) in enumerate(loader):
         # measure data loading time
         data_time.update(time.time() - end)
+        torch.save(labels, './sample_labels')
+
 
         # update learning rate
         iteration = epoch * len(loader) + it
@@ -269,11 +293,15 @@ def train(loader, model, optimizer, epoch, schedule, local_memory_index, local_m
 
         # ============ deepcluster-v2 loss ... ============
         loss = 0
+        nmi = 0
         for h in range(len(args.nmb_prototypes)):
             scores = output[h] / args.temperature
+            _, cluster_assignments = scores.max(1)
             targets = assignments[h][idx].repeat(sum(args.nmb_crops)).cuda(non_blocking=True)
+            nmi += normalized_mutual_info_score(labels.repeat(sum(args.nmb_crops)).cpu().numpy(), cluster_assignments.cpu().numpy())
             loss += cross_entropy(scores, targets)
         loss /= len(args.nmb_prototypes)
+        nmi /= len(args.nmb_prototypes)
 
         # ============ backward and optim step ... ============
         optimizer.zero_grad()
@@ -294,6 +322,7 @@ def train(loader, model, optimizer, epoch, schedule, local_memory_index, local_m
 
         # ============ misc ... ============
         losses.update(loss.item(), inputs[0].size(0))
+        train_nmi.update(nmi, inputs[0].size(0))
         batch_time.update(time.time() - end)
         end = time.time()
         if args.rank ==0 and it % 50 == 0:
@@ -302,16 +331,58 @@ def train(loader, model, optimizer, epoch, schedule, local_memory_index, local_m
                 "Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t"
                 "Data {data_time.val:.3f} ({data_time.avg:.3f})\t"
                 "Loss {loss.val:.4f} ({loss.avg:.4f})\t"
-                "Lr: {lr:.4f}".format(
+                "Lr: {lr:.4f}\t"
+                "NMI: {nmi:.4f}".format(
                     epoch,
                     it,
                     batch_time=batch_time,
                     data_time=data_time,
                     loss=losses,
                     lr=optimizer.optim.param_groups[0]["lr"],
+                    nmi=nmi
                 )
             )
-    return (epoch, losses.avg), local_memory_index, local_memory_embeddings
+        
+    valid_nmi = val(val_loader, model)
+    val_nmi.update(valid_nmi)
+    logger.info(
+            "Epoch: {0}\t"
+            "Loss {loss.val:.4f} ({loss.avg:.4f})\t"
+            "NMI: {nmi.avg:.4f}\t"
+            "Val NMI: {val_nmi.avg:.4f}".format(
+                epoch,
+                loss=losses,
+                nmi=train_nmi,
+                val_nmi=val_nmi,
+                ))
+
+    return (epoch, losses.avg, train_nmi.avg, val_nmi.avg), local_memory_index, local_memory_embeddings
+
+def val(val_loader, model):
+    val_nmi = AverageMeter()
+    model.eval()
+
+    start_idx = 0
+    with torch.no_grad():
+        for it, (idx, inputs, labels) in enumerate(val_loader):
+
+            # ============ multi-res forward passes ... ============
+            emb, output = model(inputs)
+            emb = emb.detach()
+            bs = inputs[0].size(0)
+
+            # ============ deepcluster-v2 val nmi ... ============
+            nmi = 0
+            for h in range(len(args.nmb_prototypes)):
+                scores = output[h] / args.temperature
+                _, cluster_assignments = scores.max(1)
+                nmi += normalized_mutual_info_score(labels.repeat(sum(args.nmb_crops)).cpu().numpy(), cluster_assignments.cpu().numpy())
+            nmi /= len(args.nmb_prototypes)
+
+            # ============ misc ... ============
+            val_nmi.update(nmi)
+
+    return val_nmi.avg
 
 
 def init_memory(dataloader, model):
@@ -321,7 +392,7 @@ def init_memory(dataloader, model):
     start_idx = 0
     with torch.no_grad():
         logger.info('Start initializing the memory banks')
-        for index, inputs in dataloader:
+        for index, inputs, label in dataloader:
             nmb_unique_idx = inputs[0].size(0)
             index = index.cuda(non_blocking=True)
 

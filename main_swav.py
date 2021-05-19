@@ -405,12 +405,10 @@ def train(train_loader, model, optimizer, epoch, lr_schedule, queue, val_loader)
                     p.grad = None
         optimizer.step()
 
-        val_nmi = val(val_loader, model, queue)
         # ============ misc ... ============
         losses.update(loss.item(), inputs[0].size(0))
         batch_time.update(time.time() - end)
         norm_mut_info.update(nmi)
-        val_norm_mut_info.update(val_nmi)
         end = time.time()
         if args.rank ==0 and it % 10 == 0:
             logger.info(
@@ -418,21 +416,32 @@ def train(train_loader, model, optimizer, epoch, lr_schedule, queue, val_loader)
                 "Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t"
                 "Loss {loss.val:.4f} ({loss.avg:.4f})\t"
                 "Lr: {lr:.4f}\t"
-                "NMI: {nmi:.4f}\t"
-                "Val NMI: {val_nmi:.4f}".format(
+                "NMI: {nmi:.4f}\t".format(
                     epoch,
                     it,
                     batch_time=batch_time,
                     loss=losses,
                     lr=optimizer.optim.param_groups[0]["lr"],
                     nmi=nmi,
-                    val_nmi=val_nmi,
                 )
             )
+    val_nmi = val(val_loader, model, queue)
+    val_norm_mut_info.update(val_nmi)
+    logger.info(
+            "Epoch: {0}\t"
+            "Loss {loss.val:.4f} ({loss.avg:.4f})\t"
+            "NMI: {nmi:.4f}\t"
+            "Val NMI: {val_nmi:.4f}".format(
+                epoch,
+                loss=losses,
+                nmi=nmi,
+                val_nmi=val_nmi,
+                ))
+
     return (epoch, losses.avg, norm_mut_info.avg, val_norm_mut_info.avg), queue
 
 
-def val(loader, model, queue):
+def val(val_loader, model, queue):
     norm_mut_info = AverageMeter()
     use_the_queue = False
 

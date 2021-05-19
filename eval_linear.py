@@ -1,10 +1,3 @@
-# Copyright (c) Facebook, Inc. and its affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the license found in the
-# LICENSE file in the root directory of this source tree.
-#
-
 import argparse
 import os
 import time
@@ -30,7 +23,6 @@ from src.utils import (
 )
 import src.resnet50 as resnet_models
 from src.mammo_transforms import ToTensor3D
-from dm_meta import DMMetaManager
 
 from skimage.util import img_as_float32
 from skimage import io
@@ -73,7 +65,7 @@ parser.add_argument("--epochs", default=1000, type=int,
                     help="number of total epochs to run")
 parser.add_argument("--batch_size", default=32, type=int,
                     help="batch size per gpu, i.e. how many unique instances per gpu")
-parser.add_argument("--lr", default=0.3, type=float, help="initial learning rate")
+parser.add_argument("--lr", default=1e-3, type=float, help="initial learning rate")
 parser.add_argument("--wd", default=1e-6, type=float, help="weight decay")
 parser.add_argument("--nesterov", default=False, type=bool_flag, help="nesterov momentum")
 parser.add_argument("--scheduler_type", default="cosine", type=str, choices=["step", "cosine"])
@@ -82,7 +74,7 @@ parser.add_argument("--decay_epochs", type=int, nargs="+", default=[60, 80],
                     help="Epochs at which to decay learning rate.")
 parser.add_argument("--gamma", type=float, default=0.1, help="decay factor")
 # for cosine learning rate schedule
-parser.add_argument("--final_lr", type=float, default=0.1, help="final learning rate")
+parser.add_argument("--final_lr", type=float, default=1e-3, help="final learning rate")
 
 #########################
 #### dist parameters ###
@@ -108,21 +100,19 @@ def main():
     )
 
      # build data
-    train_dataset = datasets.ImageFolder(os.path.join(args.data_path, "bps-train"))
-    val_dataset = datasets.ImageFolder(os.path.join(args.data_path, "cbis-test"))
+    train_dataset = datasets.ImageFolder(os.path.join(args.data_path, "bps-train"), loader=sk_loader)
+    val_dataset = datasets.ImageFolder(os.path.join(args.data_path, "cbis-test"), loader=sk_loader)
     tr_normalize = transforms.Normalize(
         mean=[0.485, 0.456, 0.406], std=[0.228, 0.224, 0.225]
     )
     train_dataset.transform = transforms.Compose([
+        ToTensor3D(),
         transforms.RandomResizedCrop(224),
         transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
         tr_normalize,
     ])
     val_dataset.transform = transforms.Compose([
-        transforms.Resize(256),
-        transforms.CenterCrop(224),
-        transforms.ToTensor(),
+        ToTensor3D(),
         tr_normalize,
     ])
     sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
@@ -179,7 +169,7 @@ def main():
 
     # set optimizer
     optimizer = torch.optim.SGD(
-        list(model.parameters()) + list(linear_classifier.parameters()),
+        linear_classifier.parameters(),
         lr=args.lr,
         nesterov=args.nesterov,
         momentum=0.9,
@@ -303,7 +293,8 @@ def train(model, reglog, optimizer, loader, epoch):
         target = target.cuda(non_blocking=True)
 
         # forward
-        output = model(inp)
+        with torch.no_grad():
+            output = model(inp)
         output = reglog(output)
 
         # compute cross entropy loss

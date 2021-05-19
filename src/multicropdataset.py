@@ -46,6 +46,8 @@ class MultiCropDataset(datasets.ImageFolder):
         self.return_index = return_index
 
         color_transform = [get_color_distortion()]
+        gauss_blur = transforms.GaussianBlur(kernel_size=23,
+                                            sigma=(0.1, 2.0))
         mean = [0.485, 0.456, 0.406]
         std = [0.228, 0.224, 0.225]
         trans = []
@@ -57,8 +59,9 @@ class MultiCropDataset(datasets.ImageFolder):
             trans.extend([transforms.Compose([
                 ToTensor3D(),
                 randomresizedcrop,
-                #transforms.RandomHorizontalFlip(p=0.5),
-                #transforms.Compose(color_transform),
+                transforms.RandomHorizontalFlip(p=0.5),
+                transforms.Compose(color_transform),
+                gauss_blur,
                 transforms.Normalize(mean=mean, std=std)])
             ] * nmb_crops[i])
         self.trans = trans
@@ -68,7 +71,7 @@ class MultiCropDataset(datasets.ImageFolder):
         image = self.loader(path)
         multi_crops = list(map(lambda trans: trans(image), self.trans))
         if self.return_index:
-            return index, multi_crops
+            return index, multi_crops, label
         return multi_crops, label
 
 
